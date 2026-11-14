@@ -10,11 +10,12 @@ def process_number(text: str) -> str:
     m = CNJ_RE.search(text)
     if m:
         return m.group(0)
-    # Formato de 20 dígitos corridos sem pontuação
-    m20 = re.search(r"(?<!\d)(\d{7})(\d{2})(\d{4})(\d)(\d{2})(\d{4})(?!\d)", text)
-    if m20:
+    # 20 dígitos corridos: só aceita com dígito verificador válido (CNJ, Res. 65/2008, ISO 7064 mod 97-10),
+    # senão qualquer código numérico de 20 dígitos viraria "número do processo"
+    for m20 in re.finditer(r"(?<!\d)(\d{7})(\d{2})(\d{4})(\d)(\d{2})(\d{4})(?!\d)", text):
         a, b, c, d, e, f = m20.groups()
-        return f"{a}-{b}.{c}.{d}.{e}.{f}"
+        if 98 - int(a + c + d + e + f + "00") % 97 == int(b):
+            return f"{a}-{b}.{c}.{d}.{e}.{f}"
     return ""
 
 

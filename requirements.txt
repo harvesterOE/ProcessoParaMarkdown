@@ -7,3 +7,4 @@ pillow
 rapidfuzz
 customtkinter
 tkinterdnd2
+reportlab  # só para os testes

@@ -1,4 +1,5 @@
 """Autoteste completo do conversor de processos jurídicos (PJe) para Markdown com PaddleOCR-VL-1.6."""
+import importlib.util
 from pathlib import Path
 import tempfile
 
@@ -10,25 +11,36 @@ from reportlab.pdfgen import canvas
 from proc2md import (
     PageData,
     PaddleVLEngine,
-    assemble_markdown,
     clean_auto_intimacao_lines,
     convert,
     detect_repetitive_margin_lines,
     extract_stamps_and_fls,
+    inherit_missing_doc_ids,
     otsl_to_markdown,
     parse_summary_catalog,
     strip_pje_standard_lines,
+    trim_vlm_repetition,
 )
 from procmeta import find_pdfs, process_number
 
-FONT_PATH = "C:/Windows/Fonts/arial.ttf"
-FONT_BOLD_PATH = "C:/Windows/Fonts/arialbd.ttf"
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+
+
+def load_font(names: list[str], size: int) -> ImageFont.FreeTypeFont:
+    """Arial no Windows, DejaVu no Linux."""
+    for name in names:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            pass
+    return ImageFont.load_default(size)
 
 
 def test_procmeta() -> None:
     assert process_number("Processo_0020121-88.2026.5.04.0523.pdf") == "0020121-88.2026.5.04.0523"
     assert process_number("ATOrd 00202251720255040523") == "0020225-17.2025.5.04.0523"
     assert process_number("sem_numero") == ""
+    assert process_number("protocolo 12345678901234567890") == "", "20 dígitos sem DV válido não é número CNJ"
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
         for name in ["b.pdf", "a.PDF", "notas.txt"]:
@@ -47,6 +59,19 @@ def test_otsl_to_markdown() -> None:
     assert "**Documentos**" in md
     assert "| Verba | Valor | Reflexos |" in md
     assert "| Horas Extras | R$ 1.500,00 | FGTS + 40% |" in md
+
+
+def test_trim_vlm_repetition() -> None:
+    assert trim_vlm_repetition("a\nlinha X\nlinha X\nlinha X\nlinha X\nfim") == "a\nlinha X\nfim"
+    assert trim_vlm_repetition("ok\nok") == "ok\nok"
+    assert trim_vlm_repetition("Total: " + "R$ 0,00 " * 30) == "Total: R$ 0,00 "
+
+
+def test_inherit_missing_doc_ids() -> None:
+    pages = [PageData(1, 1, doc_id="aaaaaaa"), PageData(2, 2), PageData(3, 3, doc_id="aaaaaaa"),
+             PageData(4, 4), PageData(5, 5, doc_id="bbbbbbb")]
+    inherit_missing_doc_ids(pages)
+    assert [p.doc_id for p in pages] == ["aaaaaaa", "aaaaaaa", "aaaaaaa", "", "bbbbbbb"]
 
 
 def test_extract_stamps_and_fls() -> None:
@@ -135,8 +160,8 @@ def make_rotated_scanned_image(angle_cw: int = 90) -> Image.Image:
     """Cria uma imagem de página escaneada com título, texto e tabela e a rotaciona em `angle_cw` graus no sentido horário."""
     img = Image.new("RGB", (1654, 2339), (255, 255, 255))
     d = ImageDraw.Draw(img)
-    f_title = ImageFont.truetype(FONT_BOLD_PATH, 46)
-    f_body = ImageFont.truetype(FONT_PATH, 34)
+    f_title = load_font(["C:/Windows/Fonts/arialbd.ttf", "DejaVuSans-Bold.ttf"], 46)
+    f_body = load_font(["C:/Windows/Fonts/arial.ttf", "DejaVuSans.ttf"], 34)
 
     d.text((180, 220), "COMPROVANTE DE PAGAMENTO SALARIAL", font=f_title, fill=(0, 0, 0))
     y = 340
@@ -167,7 +192,7 @@ def make_rotated_scanned_image(angle_cw: int = 90) -> Image.Image:
     return img.rotate(-angle_cw, expand=True) if angle_cw else img
 
 
-def build_synthetic_pje_pdf(pdf_path: Path) -> None:
+def build_synthetic_pje_pdf(pdf_path: Path, with_scan: bool = True) -> None:
     """Gera um PDF de processo PJe com:
     - Pág. 1: Capa do PJe
     - Pág. 2-4: Petição Inicial (ID 74744e2) com cabeçalho/rodapé repetitivo de advogado
@@ -176,6 +201,7 @@ def build_synthetic_pje_pdf(pdf_path: Path) -> None:
     - Pág. 7: Intimação automática (ID 19c710f) repetindo o texto do Despacho ID d51f601
     - Pág. 8: Reanexação duplicada da Petição Inicial (carimbo duplo 74744e2 + b86b833)
     - Pág. 9: Sumário PJe
+    Sem `with_scan`, a pág. 5 não é gerada e o PDF converte sem o OCR visual.
     """
     c = canvas.Canvas(str(pdf_path), pagesize=A4)
     w, h = A4
@@ -229,6 +255,13 @@ def build_synthetic_pje_pdf(pdf_path: Path) -> None:
         c.showPage()
 
     # Pág. 5: Documento escaneado rotacionado 90° (só o carimbo do PJe é texto; o recibo está na imagem rotacionada)
+    if with_scan:
+        draw_scanned_page(c, w, h)
+
+    draw_tail_pages(c)
+
+
+def draw_scanned_page(c: canvas.Canvas, w: float, h: float) -> None:
     rot_img = make_rotated_scanned_image(90)
     c.setFont("Helvetica", 9)
     c.drawString(500, 810, "Fls.: 5")
@@ -237,6 +270,8 @@ def build_synthetic_pje_pdf(pdf_path: Path) -> None:
     c.drawString(40, 30, "Documento assinado eletronicamente por ADVOGADO EXEMPLO, em 17/02/2026, às 17:22:03 - 9e48afe")
     c.showPage()
 
+
+def draw_tail_pages(c: canvas.Canvas) -> None:
     # Pág. 6: Despacho (ID d51f601)
     c.setFont("Helvetica", 9)
     c.drawString(500, 810, "Fls.: 6")
@@ -319,7 +354,28 @@ def build_synthetic_pje_pdf(pdf_path: Path) -> None:
     c.save()
 
 
+def test_end_to_end_digital() -> None:
+    """Processo só com páginas digitais: converte sem carregar torch nem os modelos."""
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf_path = Path(tmp) / "Processo_0020121-88.2026.5.04.0523.pdf"
+        md_path = Path(tmp) / "saida.md"
+        build_synthetic_pje_pdf(pdf_path, with_scan=False)
+        assert convert(pdf_path, md_path) is None, "não deveria ter carregado o PaddleVLEngine"
+        md = md_path.read_text(encoding="utf-8")
+        assert not (Path(tmp) / "saida.md.tmp").exists()
+        assert "# Processo Trabalhista nº 0020121-88.2026.5.04.0523" in md
+        for doc_id in ("74744e2", "d51f601", "19c710f", "b86b833"):
+            assert doc_id in md, f"ID {doc_id} ausente no Markdown"
+        assert "contato@exemplo.adv.br" not in md
+        assert "Daniela Santa Catarina" not in md
+        assert "https://pje.trt4.jus.br/pjekz/validacao" not in md
+        assert md.count("Designo perícia técnica de insalubridade") == 1
+        assert "Reprodução anexa do documento ID `74744e2`" in md
+        assert "## Sumário de Documentos do Processo" in md
+
+
 def test_end_to_end_convert() -> None:
+    """Pipeline visual completo (PaddleOCR-VL-1.6); precisa de torch e dos modelos."""
     engine = PaddleVLEngine()
     # 1. Testa diretamente a verificação e correção de orientação em imagem rotacionada 90° e 270°
     for angle_cw in (90, 270):
@@ -364,10 +420,16 @@ def test_end_to_end_convert() -> None:
 
 if __name__ == "__main__":
     test_procmeta()
+    test_trim_vlm_repetition()
+    test_inherit_missing_doc_ids()
     test_otsl_to_markdown()
     test_extract_stamps_and_fls()
     test_strip_pje_standard_lines()
     test_clean_auto_intimacao()
     test_repetitive_margins_and_catalog()
-    test_end_to_end_convert()
-    print("OK")
+    test_end_to_end_digital()
+    if HAS_TORCH:
+        test_end_to_end_convert()
+        print("OK")
+    else:
+        print("OK (sem torch: teste do OCR visual pulado)")

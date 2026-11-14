@@ -42,7 +42,7 @@ Abra **Conversor Processo para Markdown** (atalho nesta pasta) ou execute `gui.p
 
 ## Instalar
 
-Requer Python 3.12 e `torch` instalado no sistema (por exemplo, PyTorch ROCm para GPUs AMD ou CUDA para GPUs NVIDIA).
+Requer Python 3.12. O `torch` e os modelos só são carregados quando alguma página precisa do OCR visual; processos 100% digitais convertem sem eles. Para o OCR visual, instale o `torch` no sistema (por exemplo, PyTorch ROCm para GPUs AMD ou CUDA para GPUs NVIDIA).
 
 ```powershell
 python -m venv --system-site-packages .venv
@@ -55,7 +55,7 @@ python -m venv --system-site-packages .venv
 .venv\Scripts\python test_proc2md.py
 ```
 
-Executa os testes unitários e de ponta a ponta (correção de orientação em páginas rotacionadas em `90°` e `270°`, OCR com `PaddleOCR-VL-1.6`, conversão de tabelas OTSL para Markdown, limpeza de carimbos/cabeçalhos do PJe, deduplicação de intimação automática e de documentos reanexados).
+Os testes unitários e o de ponta a ponta com páginas digitais rodam em qualquer máquina, sem GPU nem `torch` (precisam só de `reportlab`). O teste do pipeline visual roda quando o `torch` está instalado. Juntos, cobrem a correção de orientação em páginas rotacionadas em `90°` e `270°`, OCR com `PaddleOCR-VL-1.6`, conversão de tabelas OTSL para Markdown, limpeza de carimbos/cabeçalhos do PJe, deduplicação de intimação automática e de documentos reanexados).
 
 ## Arquivos
 

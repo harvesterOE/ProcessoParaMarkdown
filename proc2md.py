@@ -21,6 +21,7 @@ import argparse
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from itertools import groupby
 import difflib
 import html
 import os
@@ -32,12 +33,11 @@ import warnings
 from PIL import Image, ImageOps
 import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
-import torch
 
 from procmeta import find_pdfs, process_number
 
-# MIOpen (ROCm no Windows) falha com miopenStatusUnknownError; os kernels nativos do torch funcionam na GPU.
-torch.backends.cudnn.enabled = False
+# torch/transformers só são importados quando alguma página precisa do OCR visual (PaddleVLEngine):
+# processos 100% digitais convertem sem carregar a pilha de GPU.
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -99,7 +99,7 @@ PJE_COURT_HEADER_RES = [
     re.compile(r"^GABINETE\s+D[OAE]\s+.+$", re.I),
     re.compile(r"^Processo\s+Judicial\s+Eletr[ôo]nico(?:\s*-\s*PJe)?$", re.I),
     re.compile(
-        r"^(?:ATOrd|ATSum|ROT|RORSum|AP|AIRO|AIAP|CartPrec\w*|CumSen\w*|ExProv\w*|HTE|TutCaut\w*|ConPag|Monit|AlvJud| RPV|Precat)\s*"
+        r"^(?:ATOrd|ATSum|ROT|RORSum|AP|AIRO|AIAP|CartPrec\w*|CumSen\w*|ExProv\w*|HTE|TutCaut\w*|ConPag|Monit|AlvJud|RPV|Precat)\s*"
         r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$",
         re.I,
     ),
@@ -178,6 +178,7 @@ class PaddleVLEngine:
     """Agrupa os três modelos do pipeline PaddleOCR-VL-1.6 (orientação + layout + VLM)."""
 
     def __init__(self, device: str | None = None) -> None:
+        import torch
         from transformers import (
             AutoImageProcessor,
             AutoModelForImageClassification,
@@ -186,6 +187,8 @@ class PaddleVLEngine:
             AutoProcessor,
         )
 
+        # MIOpen (ROCm no Windows) falha com miopenStatusUnknownError; os kernels nativos do torch funcionam na GPU.
+        torch.backends.cudnn.enabled = False
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
 
@@ -207,6 +210,8 @@ class PaddleVLEngine:
 
     def predict_orientation(self, img: Image.Image, strip_margins: bool = True) -> tuple[int, float, float]:
         """Devolve (ângulo_previsto, confiança_prevista, confiança_em_0_graus) para a imagem."""
+        import torch
+
         w, h = img.size
         body = img.crop((int(w * 0.03), int(h * 0.05), int(w * 0.97), int(h * 0.92))) if strip_margins else img
         inv = ImageOps.invert(body.convert("L")).point(lambda x: 255 if x > 30 else 0)
@@ -237,6 +242,8 @@ class PaddleVLEngine:
 
     def detect_layout(self, img: Image.Image, threshold: float = 0.45) -> list[tuple[str, float, list[int]]]:
         """Devolve lista de (rótulo, score, [x0, y0, x1, y1]) na ordem de leitura do PP-DocLayoutV3."""
+        import torch
+
         with torch.inference_mode():
             inp = self.layout_processor(images=img, return_tensors="pt").to(self.device)
             out = self.layout_model(**inp)
@@ -256,6 +263,8 @@ class PaddleVLEngine:
 
     def recognize_crop(self, crop: Image.Image, task: str = "ocr", max_new_tokens: int = 1024) -> str:
         """Executa o PaddleOCR-VL-1.6 em um recorte com o prompt da tarefa ('ocr', 'table', 'formula')."""
+        import torch
+
         prompts = {
             "ocr": "OCR:",
             "table": "Table Recognition:",
@@ -288,6 +297,16 @@ class PaddleVLEngine:
         prompt_len = inputs["input_ids"].shape[1]
         text = self.vl_processor.decode(generated[0, prompt_len:], skip_special_tokens=True)
         return text.strip()
+
+
+def trim_vlm_repetition(text: str) -> str:
+    """Corta os laços de repetição do VLM (a mesma linha ou o mesmo trecho gerado sem parar até o limite de tokens):
+    3+ linhas idênticas seguidas viram uma; um trecho de 8+ caracteres repetido 5+ vezes seguidas vira um."""
+    out: list[str] = []
+    for _key, grp in groupby(text.splitlines(), key=str.strip):
+        grp = list(grp)
+        out += grp[:1] if len(grp) >= 3 and _key else grp
+    return re.sub(r"(.{8,200}?)\1{4,}", r"\1", "\n".join(out), flags=re.S)
 
 
 def otsl_to_markdown(raw: str) -> str:
@@ -470,12 +489,12 @@ def ocr_page_with_vlm(
             if raw_f:
                 lines.append(f"$${raw_f}$$")
         elif kind == "title":
-            raw_t = engine.recognize_crop(crop, task="ocr", max_new_tokens=256)
+            raw_t = trim_vlm_repetition(engine.recognize_crop(crop, task="ocr", max_new_tokens=256))
             cleaned_t = " ".join(raw_t.split())
             if cleaned_t and cleaned_t not in OCR_LOGO_ARTIFACTS:
                 lines.append(f"### {cleaned_t}")
         else:
-            raw_txt = engine.recognize_crop(crop, task="ocr", max_new_tokens=1024)
+            raw_txt = trim_vlm_repetition(engine.recognize_crop(crop, task="ocr", max_new_tokens=1024))
             for ln in raw_txt.splitlines():
                 s = ln.strip()
                 if s and s not in OCR_LOGO_ARTIFACTS:
@@ -834,7 +853,6 @@ def convert(
         raw_texts: list[str] = [pdf[i].get_textpage().get_text_range() for i in range(total_pages)]
         catalog, summary_pages = parse_summary_catalog(raw_texts)
 
-        # Propaga o ID do documento para páginas intermediárias sem carimbo quando a página seguinte do mesmo doc o tem
         page_stamps: list[tuple[list[StampInfo], int | None]] = [
             extract_stamps_and_fls(t) for t in raw_texts
         ]
@@ -953,10 +971,25 @@ def convert(
 
         report("montando o Markdown…")
         markdown_text = assemble_markdown(pdf_path, raw_texts, pages_data, catalog)
-        md_path.write_text(markdown_text, encoding="utf-8")
+        # Grava ao lado e troca no fim: um .md pela metade nunca fica no lugar (o --skip-existing o pularia)
+        tmp_path = md_path.with_name(md_path.name + ".tmp")
+        tmp_path.write_text(markdown_text, encoding="utf-8")
+        os.replace(tmp_path, md_path)
         return engine
     finally:
         pdf.close()
+
+
+def inherit_missing_doc_ids(pages: list[PageData]) -> None:
+    """Página sem carimbo legível (ex.: escaneada sem camada de texto) entre páginas do mesmo documento
+    herda o ID dele, para não quebrar o documento em dois blocos com uma página "Sem ID" no meio."""
+    for i in range(1, len(pages) - 1):
+        p, prev, nxt = pages[i], pages[i - 1], pages[i + 1]
+        if p.doc_id or p.is_cover or p.is_summary or prev.is_cover or nxt.is_summary:
+            continue
+        if prev.doc_id and (prev.doc_id, prev.orig_id) == (nxt.doc_id, nxt.orig_id):
+            p.doc_id, p.orig_id = prev.doc_id, prev.orig_id
+            p.signer, p.sign_date, p.sign_time = prev.signer, prev.sign_date, prev.sign_time
 
 
 def deduplicate_consecutive_notices(pages: list[PageData]) -> None:
@@ -994,6 +1027,8 @@ def assemble_markdown(
 ) -> str:
     """Monta o documento Markdown final com cabeçalho do processo, seções por ID de documento,
     marcadores de página/folha e sumário estruturado."""
+    inherit_missing_doc_ids(pages)
+
     # 1. Remove linhas de margem repetitivas (escritórios de advocacia, peritos, empresas) e reagrupa parágrafos
     rep_margins = detect_repetitive_margin_lines(pages)
     for p in pages:
