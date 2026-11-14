@@ -42,7 +42,7 @@ Abra **Conversor Processo para Markdown** (atalho nesta pasta) ou execute `gui.p
 
 ## Instalar
 
-Requer Python 3.12. O `torch` e os modelos só são carregados quando alguma página precisa do OCR visual; processos 100% digitais convertem sem eles. Para o OCR visual, instale o `torch` no sistema (por exemplo, PyTorch ROCm para GPUs AMD ou CUDA para GPUs NVIDIA).
+Requer Python 3.12. O `torch` e os modelos só são carregados quando alguma página precisa do OCR visual; processos 100% digitais convertem sem eles. Para o OCR visual, instale no sistema o `torch` e o `torchvision` da mesma versão (por exemplo, PyTorch ROCm para GPUs AMD ou CUDA para GPUs NVIDIA); sem o `torchvision` os modelos de orientação e layout não carregam.
 
 ```powershell
 python -m venv --system-site-packages .venv
