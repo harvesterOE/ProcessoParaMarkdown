@@ -1,0 +1,9 @@
+transformers>=5.0.0
+accelerate
+safetensors
+pypdfium2
+opencv-python-headless
+pillow
+rapidfuzz
+customtkinter
+tkinterdnd2
